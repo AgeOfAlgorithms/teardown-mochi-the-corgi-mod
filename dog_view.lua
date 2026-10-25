@@ -412,6 +412,7 @@ function MochiClientDraw()
 			end
 		end
 	end
+	if MOCHI_NO_HUD then return end                                  -- (staged pictures: no hints, notices or prompts)
 	-- his health over his head while he's hurt (and alive), within 25 m
 	if not m.dead and m.hp and m.maxHp and m.hp < m.maxHp - 0.5 then
 		local x, y, dist = UiWorldToPixel(VecAdd(V.headTop, Vec(0, 0.32, 0)))
