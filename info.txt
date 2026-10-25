@@ -1,0 +1,6 @@
+name = Mochi the Corgi
+author = AgeOfAlgorithms and Claude
+description = The AI dog you can talk to. Tell Mochi what to do, out loud or in chat - "Mochi, roll over!", "fetch!", "follow me" - and he understands, answers in his own speech bubbles and does it. Ask him anything: he chats back in character, remembers what just happened and wags when he's happy. Tricks, fetch, treats, petting (E), and he bites back if you hurt him. Needs Proximity Comms; AI conversations need the free Koetama app on the host. [noupload]
+tags = Gameplay
+preview = preview_td.jpg
+version = 2
