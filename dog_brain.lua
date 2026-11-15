@@ -1516,14 +1516,11 @@ function MochiServerInit()
 	MOCHI_WORLD = W
 	MochiUse(newDog(1))
 	-- the Villagers mod's API (villagers/mods/villagers/API.md; plain host keys, nothing reads them without it): what a
-	-- corgi is and how each villager feels about one (the Villagers session asked, for the user, 2026-11-15)
+	-- corgi is and his reputation (feel is only a hint: each villager judges him with their own AI; no per-villager feelings from us)
 	SetString("villagers.kind.corgi.name", "a corgi dog")
 	SetString("villagers.kind.corgi.feel", "love")
 	SetString("villagers.kind.corgi.note", "a friendly talking corgi who loves treats and belly rubs")
 	SetFloat("villagers.kind.corgi.danger", 0)
-	for id, feel in pairs({bett = "love", wren = "love", ruben = "like", eskil = "wary", odette = "disgust"}) do
-		SetString("villagers.kind.corgi.feel." .. id, feel)
-	end
 end
 
 -- (each dog, every 0.5 s) where he is for the villagers: his anchor body (it follows his head), his name, what he does
