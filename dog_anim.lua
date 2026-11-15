@@ -16,6 +16,8 @@
 --     carry  true: the jaw holds the ball
 --     angry  0..1: attacking - head low, lips back (the jaw a little open), tail up and stiff
 --     scared 0..1: running away - tail tucked down, head low, crouched a little, no wag
+--     bored  0..1: nothing has happened for a while - head low, ears and tail droopy, slow breaths
+--     swim   0..1: in the water - the doggy paddle (time-driven), nose up, rump low (the server floats the root)
 --     time   GetTime() (wag, breathing, panting)
 --     lookYaw, lookPitch  degrees the head turns toward someone (+yaw = to the dog's left, +pitch = up); clamped
 --   DOG_STATES     every state DogPose knows
@@ -27,7 +29,7 @@
 -- positive moves a hanging leg toward +x. The whole-dog motion ("root") is a rotation about a point plus a lift.
 
 DOG_STATES = {"stand", "walk", "sit", "lie", "dead", "roll_over", "play_dead", "spin", "jump", "shake_paw", "beg", "bow",
-	"bark", "eat", "wiggle", "stand_up", "sit_down", "lie_down", "bite", "flinch", "die", "sniff"}
+	"bark", "eat", "wiggle", "stand_up", "sit_down", "lie_down", "bite", "flinch", "die", "sniff", "yawn", "shake_off"}
 DOG_ACTS = {
 	sit_down = {dur = 0.35, after = "sit"}, lie_down = {dur = 0.45, after = "lie"}, stand_up = {dur = 0.35, after = "stand"},
 	roll_over = {dur = 1.8, after = "lie"}, play_dead = {dur = 0.6, after = "dead"}, spin = {dur = 1.4, after = "stand"},
@@ -36,6 +38,8 @@ DOG_ACTS = {
 	wiggle = {dur = 1.6, after = nil},
 	bite = {dur = 0.5, after = "stand"}, flinch = {dur = 0.35, after = nil}, die = {dur = 0.9, after = "dead"},
 	sniff = {dur = 2.2, after = nil},
+	yawn = {dur = 2.0, after = nil},
+	shake_off = {dur = 1.4, after = nil},
 }
 
 local rad, sin, cos, abs, sqrt, floor = math.rad, math.sin, math.cos, math.abs, math.sqrt, math.floor
@@ -367,6 +371,25 @@ local function act(P, a, st, t)
 		P.head[2] = P.head[2] + 18 * sin(t * 1.7) * d
 		P.jaw[1] = 2 * d
 		return P
+	elseif st == "yawn" then                                   -- (bored: the head goes up, a slow, huge yawn, a shake)
+		posture(P, base)
+		local d = smooth(t / 0.5) * (1 - smooth((t - 1.4) / 0.4))
+		P.head[1] = P.head[1] - 22 * d
+		P.jaw[1] = 38 * smooth((t - 0.2) / 0.6) * (1 - smooth((t - 1.2) / 0.4))
+		local sh = t > 1.6 and sin((t - 1.6) / 0.4 * pi) or 0            -- (a little head shake after)
+		P.head[3] = P.head[3] + 10 * sh * sin(t * 30)
+		return P
+	elseif st == "shake_off" then                              -- (out of the water: the wet-dog shake, head first, the
+		posture(P, base)                                       --  body and the tail after it, feet planted)
+		local d = smooth(t / 0.25) * (1 - smooth((t - 1.1) / 0.3))
+		local w = t * 2 * pi * 5.5
+		P.head[3] = P.head[3] + 30 * d * sin(w)
+		P.head[1] = P.head[1] + 8 * d
+		P.body[3] = P.body[3] + 12 * d * sin(w - 0.9)
+		P.root[3] = P.root[3] + 4 * d * sin(w - 0.9)
+		P.tail[2] = P.tail[2] + 40 * d * sin(w - 1.8)
+		P.jaw[1] = 6 * d
+		return P
 	elseif st == "wiggle" then                                 -- (being petted: a head tilt, the whole body wiggles)
 		posture(P, base)
 		local d = smooth(t / 0.2) * (1 - smooth((t - 1.3) / 0.3))
@@ -401,6 +424,30 @@ local function overlays(P, a, st)
 		P.tail[2] = P.tail[2] * (1 - scared)
 		P.head[1] = P.head[1] + 16 * scared
 		P.root.lift[2] = P.root.lift[2] - 0.025 * scared
+	end
+	local bored = clamp(a.bored or 0, 0, 1)
+	if bored > 0 and st ~= "dead" and st ~= "die" and st ~= "yawn" then
+		P.head[1] = P.head[1] + 14 * bored                            -- (head low, tail limp)
+		P.tail[1] = P.tail[1] - 30 * bored
+		P.tail[2] = P.tail[2] * (1 - 0.8 * bored)
+	end
+	local swim = clamp(a.swim or 0, 0, 1)
+	if swim > 0 and st ~= "dead" and st ~= "die" and st ~= "play_dead" then
+		-- the doggy paddle (time-driven: faster when going somewhere): front paws reach forward and pull down, hind legs
+		-- kick, the nose up and the rump low, the tail floating out behind, a little bob
+		local f = lerp(1.3, 2.1, smooth((a.speed or 0) / 1.3))
+		local ph = tm * 2 * pi * f
+		P.leg_fl[1] = lerp(P.leg_fl[1], -38 + 32 * sin(ph), swim)
+		P.leg_fr[1] = lerp(P.leg_fr[1], -38 + 32 * sin(ph + pi), swim)
+		P.leg_bl[1] = lerp(P.leg_bl[1], 22 + 26 * sin(ph + pi * 0.5), swim)
+		P.leg_br[1] = lerp(P.leg_br[1], 22 + 26 * sin(ph + pi * 1.5), swim)
+		for _, n in ipairs(LEGS) do P[n][3] = P[n][3] * (1 - swim) end
+		P.body[1] = P.body[1] * (1 - swim)
+		P.body[3] = P.body[3] * (1 - swim) + 2 * sin(ph) * swim
+		P.root[1] = P.root[1] - 10 * swim                              -- (nose up, rump down)
+		P.root.lift[2] = P.root.lift[2] * (1 - swim) + 0.012 * sin(ph * 2) * swim
+		P.head[1] = P.head[1] - 14 * swim
+		P.tail[1] = lerp(P.tail[1], 8, swim)
 	end
 	local angry = clamp(a.angry or 0, 0, 1)
 	if angry > 0 and st ~= "dead" and st ~= "die" then

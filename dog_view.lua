@@ -1,20 +1,22 @@
--- Mochi the Corgi: the dog drawn on every machine (client). Include dog_rig.lua and dog_anim.lua before it. No #version
+-- Mochi the Corgi: the dogs drawn on every machine (client). Include dog_rig.lua and dog_anim.lua before it. No #version
 -- line (included). Globals: MochiClientInit(), MochiClientTick(dt), MochiClientRender(dt), MochiClientDraw().
 --
--- The server publishes the dog in shared.mochi (where it is, its heading, posture, act, wag, talking, ...), ~20 times a
--- second; each machine spawns its own model (one body per part, as Echo Hunt's monster: collision filtered off, moved
--- with SetBodyTransform from client.render - the verified pattern) and poses it with DogPose, blending each change of
--- state. Players pet it with E (looking at it, close) and toss it a treat with H.
+-- The server publishes the dogs in shared.mochis (d = a list, each with its serial k: where it is, its heading, posture,
+-- act, wag, talking, ...; the ball and the host's notice once), ~20 times a second; each machine spawns its own model of
+-- every dog (one body per part, as Echo Hunt's monster: collision filtered off, moved with SetBodyTransform from
+-- client.render - the verified pattern) and poses it with DogPose, blending each change of state. Players pet the dog
+-- they look at with E (close) and toss a treat with H.
 
-MOCHI_VIEW = {spawned = false, parts = nil}
+MOCHI_VIEW = {dogs = {}, toys = {}, petOk = false, petK = nil, takeAt = nil}
 
-local V = MOCHI_VIEW
+local V = MOCHI_VIEW                          -- (what this machine shows once: the toys, the prompts)
+local D = nil                                 -- (the dog being drawn now: V.dogs[k])
 local PET_RANGE, PET_ANGLE = 2.6, 28          -- m, degrees off the view
 local TAKE_RANGE, TAKE_ANGLE = 2.2, 35        -- the ball on the ground: E picks it up
 local HINT_RANGE = 9
-local SOUND_MIN, SOUND_REACH = 0.25, 60       -- GetLastSound volume he notices; m a volume of 1 carries (Echo Hunt's
-                                              -- rule: footsteps ~0.05, a dropped crate 0.22, a bullet impact 0.52,
-                                              -- explosions 1.3-4.9)
+local SOUND_MIN = 0.25                        -- GetLastSound volume he notices; m a volume of 1 carries: MOCHI_SOUND_REACH
+                                              -- (Echo Hunt's rule: footsteps ~0.05, a dropped crate 0.22, a bullet impact
+                                              -- 0.52, explosions 1.3-4.9)
 local BLEND = 0.22                            -- s a change of state blends
 local LAYER = 32
 
@@ -39,10 +41,12 @@ function MochiClientInit()
 	snd.growl = load("growl", 2)
 	snd.yelp = load("yelp", 2)
 	snd.snap = load("snap", 2)
-	V.anim = {st = "stand", t = 0, base = "stand", phase = 0, speed = 0, wag = 0, talk = 0, time = 0}
-	V.out = {}
-	V.hearts = {}
-	V.barks = {}
+	snd.splash, snd.paddle = {}, {}                             -- (the game's own water sounds)
+	for i = 0, 3 do
+		snd.splash[#snd.splash + 1] = LoadSound("water/splash-m" .. i .. ".ogg")
+		snd.paddle[#snd.paddle + 1] = LoadSound("water/splash-s" .. i .. ".ogg")
+	end
+	V.inited = true
 end
 
 local function play(list, pos, vol, pitch)
@@ -86,28 +90,25 @@ local function centre(q)
 	return true
 end
 
-local function spawnModel()
-	V.parts = {}
-	V.shapes = {}
+-- a dog this machine draws (his model, pose state, sounds' counters)
+local function newDogView(k)
+	local E = {k = k, parts = {}, anim = {st = "stand", t = 0, base = "stand", phase = 0, speed = 0, wag = 0, talk = 0, time = 0},
+		out = {}, hearts = {}, barks = {}, keep = {}, mixed = {}}
 	for _, p in ipairs(DOG_RIG.parts) do
 		local q = spawnPart(p)
-		if q then
-			V.parts[#V.parts + 1] = q
-			for _, s in ipairs(q.shapes) do V.shapes[#V.shapes + 1] = s end
-		end
+		if q then E.parts[#E.parts + 1] = q end
 	end
-	V.spawned = true
+	return E
 end
 
-local function deleteModel()
-	for _, q in ipairs(V.parts or {}) do if IsHandleValid(q.body) then Delete(q.body) end end
-	V.parts, V.spawned = nil, false
+local function deleteDogView(E)
+	for _, q in ipairs(E.parts or {}) do if IsHandleValid(q.body) then Delete(q.body) end end
+	E.parts = {}
 end
 
 -- ---- the toys' detailed models: the server's ball and treats are plain invisible physics bodies (a body holding a scaled
 -- shape stays static), found here by their tags; each gets the 0.025 m model placed on its middle every frame
 local TOYS = {{tag = "mochiball", file = "MOD/vox/ball.vox"}, {tag = "mochitreat", file = "MOD/vox/treat.vox"}}
-V.toys = {}
 
 -- the middle of a toy's physics body (its first shape's box), and its rotation; nil if it has none
 local function toyMiddle(h)
@@ -151,62 +152,53 @@ local function renderToys()
 end
 MochiToyMiddle = toyMiddle
 
--- ---- following the server's dog
+-- ---- following the server's dogs
 local function readShared()
-	local m = shared.mochi
-	if type(m) ~= "table" or type(m.n) ~= "number" then return nil end
+	local m = shared.mochis
+	if type(m) ~= "table" or type(m.n) ~= "number" or type(m.d) ~= "table" then return nil end
 	return m
 end
 
 local function track(m, dt)
 	local target = Vec(m.x, m.y, m.z)
-	if not V.pos or VecLength(VecSub(target, V.pos)) > 4 then       -- (first sight, or it was moved far: jump there)
-		V.pos, V.yaw = target, m.yaw
+	if not D.pos or VecLength(VecSub(target, D.pos)) > 4 then       -- (first sight, or it was moved far: jump there)
+		D.pos, D.yaw = target, m.yaw
 	else
 		local k = 1 - math.exp(-dt * 14)
-		V.pos = VecLerp(V.pos, target, k)
-		V.yaw = (V.yaw + angDiff(V.yaw, m.yaw) * (1 - math.exp(-dt * 12))) % 360
+		D.pos = VecLerp(D.pos, target, k)
+		D.yaw = (D.yaw + angDiff(D.yaw, m.yaw) * (1 - math.exp(-dt * 12))) % 360
 	end
 end
 
 -- the state DogPose gets, and the start of each act as this machine saw it
 local function state(m, now)
-	if m.actN ~= V.actN then
-		if V.actN ~= nil and m.act ~= "" then V.actT0 = now end      -- (the first value seen is not a new act)
-		if V.actN == nil and m.act ~= "" then V.actT0 = now - 0.2 end
-		V.actN = m.actN
-		if m.act == "bark" then V.barks = {now + 0.03, now + 0.36, now + 0.69} end
-		if m.act == "bite" then V.snapAt = now + 0.2 end
+	if m.actN ~= D.actN then
+		if D.actN ~= nil and m.act ~= "" then D.actT0 = now end      -- (the first value seen is not a new act)
+		if D.actN == nil and m.act ~= "" then D.actT0 = now - 0.2 end
+		D.actN = m.actN
+		if m.act == "bark" then D.barks = {now + 0.03, now + 0.36, now + 0.69} end
+		if m.act == "bite" then D.snapAt = now + 0.2 end
 	end
 	local st, t, base
-	if m.act ~= "" and V.actT0 then st, t, base = m.act, now - V.actT0, m.actBase
+	if m.act ~= "" and D.actT0 then st, t, base = m.act, now - D.actT0, m.actBase
 	elseif m.speed > 0.25 then st, t, base = "walk", 0, "stand"
 	else st, t, base = m.posture, 0, m.posture end
 	return st, t, base
 end
 
-local keep, mixed = {}, {}
-function MochiClientRender(dt)
-	local m = readShared()
-	if not m then
-		if V.spawned then deleteModel() end
-		return
-	end
-	if not V.anim then MochiClientInit() end
-	if not V.spawned then spawnModel() end
-	renderToys()
-	local now = GetTime()
-	local lastPos = V.pos and VecCopy(V.pos)
+-- one dog (D current), from his published m
+local function renderDog(m, dt, now, maxHp)
+	local lastPos = D.pos and VecCopy(D.pos)
 	track(m, dt)
-	local a = V.anim
+	local a = D.anim
 	local st, t, base = state(m, now)
 	if st ~= a.st or base ~= a.base then
-		if V.lastP then DogPoseCopy(V.lastP, keep); V.blendT0 = now end
+		if D.lastP then DogPoseCopy(D.lastP, D.keep); D.blendT0 = now end
 	end
 	a.st, a.t, a.base = st, t, base
 	a.speed = m.speed
 	if lastPos and st == "walk" then
-		local d = VecLength(Vec(V.pos[1] - lastPos[1], 0, V.pos[3] - lastPos[3]))
+		local d = VecLength(Vec(D.pos[1] - lastPos[1], 0, D.pos[3] - lastPos[3]))
 		if d < 1 then a.phase = (a.phase + d / DogStride(math.max(0.3, m.speed)) * 2 * math.pi) % (2 * math.pi) end
 	end
 	a.wag = a.wag + ((m.wag or 0) - a.wag) * (1 - math.exp(-dt * 6))
@@ -214,6 +206,8 @@ function MochiClientRender(dt)
 	a.carry = m.carry
 	a.angry = (a.angry or 0) + ((m.angry and 1 or 0) - (a.angry or 0)) * (1 - math.exp(-dt * 8))
 	a.scared = (a.scared or 0) + ((m.scared and 1 or 0) - (a.scared or 0)) * (1 - math.exp(-dt * 8))
+	a.bored = (a.bored or 0) + ((m.bored and 1 or 0) - (a.bored or 0)) * (1 - math.exp(-dt * 2))
+	a.swim = (a.swim or 0) + ((m.swim and 1 or 0) - (a.swim or 0)) * (1 - math.exp(-dt * 6))
 	a.time = now
 	-- the head turns toward whoever it looks at
 	local ly, lp = 0, 0
@@ -222,87 +216,117 @@ function MochiClientRender(dt)
 	elseif m.look and m.look ~= 0 and IsPlayerValid(m.look) then target = GetPlayerEyeTransform(m.look).pos end
 	if target then
 		local eye = target
-		local head = VecAdd(V.pos, Vec(0, 0.5, 0))
+		local head = VecAdd(D.pos, Vec(0, 0.5, 0))
 		local d = VecSub(eye, head)
 		local h = math.sqrt(d[1] * d[1] + d[3] * d[3])
-		ly = angDiff(V.yaw, math.deg(math.atan2(d[1], d[3])))
+		ly = angDiff(D.yaw, math.deg(math.atan2(d[1], d[3])))
 		lp = math.deg(math.atan2(d[2], math.max(0.2, h)))
 		if math.abs(ly) > 100 then ly, lp = 0, 0 end                  -- (behind it: it doesn't twist its neck round)
 	end
-	V.ly = (V.ly or 0) + (ly - (V.ly or 0)) * (1 - math.exp(-dt * 6))
-	V.lp = (V.lp or 0) + (lp - (V.lp or 0)) * (1 - math.exp(-dt * 6))
-	a.lookYaw, a.lookPitch = V.ly, V.lp
+	D.ly = (D.ly or 0) + (ly - (D.ly or 0)) * (1 - math.exp(-dt * 6))
+	D.lp = (D.lp or 0) + (lp - (D.lp or 0)) * (1 - math.exp(-dt * 6))
+	a.lookYaw, a.lookPitch = D.ly, D.lp
 	local P = DogDescribe(a)
-	if V.blendT0 and now - V.blendT0 < BLEND then
-		local s = (now - V.blendT0) / BLEND
+	if D.blendT0 and now - D.blendT0 < BLEND then
+		local s = (now - D.blendT0) / BLEND
 		s = s * s * (3 - 2 * s)
-		DogPoseCopy(keep, mixed)
-		DogPoseMix(mixed, P, s)
-		P = mixed
+		DogPoseCopy(D.keep, D.mixed)
+		DogPoseMix(D.mixed, P, s)
+		P = D.mixed
 	end
-	V.lastP = V.lastP or {}
-	DogPoseCopy(P, V.lastP)
-	DogSolve(P, V.out)
-	local root = Transform(V.pos, QuatEuler(0, V.yaw, 0))
+	D.lastP = D.lastP or {}
+	DogPoseCopy(P, D.lastP)
+	DogSolve(P, D.out)
+	local root = Transform(D.pos, QuatEuler(0, D.yaw, 0))
 	local zero = Vec(0, 0, 0)
-	for _, q in ipairs(V.parts) do centre(q) end
-	for _, q in ipairs(V.parts) do
-		local tr = V.out[q.name]
+	for _, q in ipairs(D.parts) do centre(q) end
+	for _, q in ipairs(D.parts) do
+		local tr = D.out[q.name]
 		if tr and IsHandleValid(q.body) then
 			SetBodyTransform(q.body, TransformToParentTransform(root, tr))
 			SetBodyVelocity(q.body, zero)
 			SetBodyAngularVelocity(q.body, zero)
 		end
 	end
-	V.headTop = TransformToParentPoint(root, Vec(DOG_RIG.headTop[1], DOG_RIG.headTop[2], DOG_RIG.headTop[3]))
-	V.mid = TransformToParentPoint(root, Vec(0, 0.3, 0.05))
-	-- sounds and hearts
-	local mouth = V.out.__mouth and TransformToParentPoint(root, V.out.__mouth) or V.headTop
-	for i = #V.barks, 1, -1 do
-		if now >= V.barks[i] then play(snd.bark, mouth, 0.9); table.remove(V.barks, i) end
+	D.headTop = TransformToParentPoint(root, Vec(DOG_RIG.headTop[1], DOG_RIG.headTop[2], DOG_RIG.headTop[3]))
+	D.mid = TransformToParentPoint(root, Vec(0, 0.3, 0.05))
+	-- sounds and hearts (each dog's own)
+	local mouth = D.out.__mouth and TransformToParentPoint(root, D.out.__mouth) or D.headTop
+	for i = #D.barks, 1, -1 do
+		if now >= D.barks[i] then play(snd.bark, mouth, 0.9); table.remove(D.barks, i) end
 	end
-	if V.eatN and m.eatN ~= V.eatN then play(snd.munch, mouth, 0.8) end
-	V.eatN = m.eatN
-	if V.heartN and m.heartN ~= V.heartN then
-		for i = 1, 3 do V.hearts[#V.hearts + 1] = {t0 = now + (i - 1) * 0.18, x = (math.random() - 0.5) * 0.3, z = (math.random() - 0.5) * 0.3} end
+	if D.eatN and m.eatN ~= D.eatN then play(snd.munch, mouth, 0.8) end
+	D.eatN = m.eatN
+	if D.heartN and m.heartN ~= D.heartN then
+		for i = 1, 3 do D.hearts[#D.hearts + 1] = {t0 = now + (i - 1) * 0.18, x = (math.random() - 0.5) * 0.3, z = (math.random() - 0.5) * 0.3} end
 		play(math.random() < 0.5 and snd.yip or snd.whine, mouth, 0.6, 1.0 + math.random() * 0.15)
 	end
-	V.heartN = m.heartN
-	if V.whineN and m.whineN ~= V.whineN then play(snd.whine, mouth, 0.7, 0.9) end
-	V.whineN = m.whineN
-	if V.growlN and m.growlN ~= V.growlN then play(snd.growl, mouth, 0.9) end
-	V.growlN = m.growlN
-	if V.yelpN and m.yelpN ~= V.yelpN then play(#snd.yelp > 0 and snd.yelp or snd.whine, mouth, 1.0, 1.05 + math.random() * 0.1) end
-	V.yelpN = m.yelpN
-	if V.snapAt and now >= V.snapAt then play(snd.snap, mouth, 0.9); V.snapAt = nil end
-	if m.dead and not V.dead then play(snd.whine, mouth, 0.8, 0.8) end    -- (a last whimper)
-	if m.scared and now >= (V.whimperT or 0) then                       -- (running scared: a whimper now and then)
-		if V.whimperT then play(snd.whine, mouth, 0.6, 1.15 + math.random() * 0.1) end
-		V.whimperT = now + 2.5 + math.random() * 2
-	elseif not m.scared then V.whimperT = nil end
-	V.dead = m.dead
-	V.hp, V.maxHp = m.hp, m.maxHp
+	D.heartN = m.heartN
+	if D.whineN and m.whineN ~= D.whineN then play(snd.whine, mouth, 0.7, 0.9) end
+	D.whineN = m.whineN
+	if D.growlN and m.growlN ~= D.growlN then play(snd.growl, mouth, 0.9) end
+	D.growlN = m.growlN
+	if D.yelpN and m.yelpN ~= D.yelpN then play(#snd.yelp > 0 and snd.yelp or snd.whine, mouth, 1.0, 1.05 + math.random() * 0.1) end
+	D.yelpN = m.yelpN
+	if D.snapAt and now >= D.snapAt then play(snd.snap, mouth, 0.9); D.snapAt = nil end
+	if m.dead and D.dead == false then play(snd.whine, mouth, 0.8, 0.8) end   -- (a last whimper - not for one seen dead)
+	if m.scared and now >= (D.whimperT or 0) then                       -- (running scared: a whimper now and then)
+		if D.whimperT then play(snd.whine, mouth, 0.6, 1.15 + math.random() * 0.1) end
+		D.whimperT = now + 2.5 + math.random() * 2
+	elseif not m.scared then D.whimperT = nil end
+	D.dead = m.dead and true or false
+	if m.swim and D.swim == false then play(snd.splash, D.mid, 0.8) end  -- (into the water: a splash; then paddling)
+	if m.swim and m.speed > 0.3 and now >= (D.paddleT or 0) then
+		if D.paddleT then play(snd.paddle, D.mid, 0.25, 1.1 + math.random() * 0.2) end
+		D.paddleT = now + 0.45 + math.random() * 0.3
+	elseif not m.swim then D.paddleT = nil end
+	D.swim = m.swim and true or false
+	D.hp, D.maxHp, D.name = m.hp, maxHp, m.name
+end
+
+function MochiClientRender(dt)
+	local S = readShared()
+	if not S then
+		for k, E in pairs(V.dogs) do deleteDogView(E); V.dogs[k] = nil end
+		return
+	end
+	if not V.inited then MochiClientInit() end
+	renderToys()
+	local now = GetTime()
+	local seen = {}
+	for _, m in ipairs(S.d) do
+		if type(m) == "table" and m.k then
+			seen[m.k] = true
+			D = V.dogs[m.k]
+			if not D then D = newDogView(m.k); V.dogs[m.k] = D end
+			renderDog(m, dt, now, S.maxHp)
+		end
+	end
+	D = nil
+	for k, E in pairs(V.dogs) do                                       -- (dogs the server has no more)
+		if not seen[k] then deleteDogView(E); V.dogs[k] = nil end
+	end
 end
 
 -- ---- E to pet, H for a treat
 local function typing(me) return GetBool("proxchat.typing." .. me) end
 
-local function canPet(me)
-	if not (V.mid and IsPlayerValid(me) and GetPlayerHealth(me) > 0) or V.dead then return false end
+-- how straight at dog E player me looks, close enough to pet him (false: not)
+local function canPet(me, E)
+	if not (E.mid and IsPlayerValid(me) and GetPlayerHealth(me) > 0) or E.dead then return false end
 	if GetPlayerVehicle(me) ~= 0 then return false end
 	local cam = GetPlayerCameraTransform(me)
-	local to = VecSub(V.mid, cam.pos)
+	local to = VecSub(E.mid, cam.pos)
 	local feet = GetPlayerTransform(me).pos
-	if VecLength(Vec(V.mid[1] - feet[1], 0, V.mid[3] - feet[3])) > PET_RANGE then return false end
+	if VecLength(Vec(E.mid[1] - feet[1], 0, E.mid[3] - feet[3])) > PET_RANGE then return false end
 	local f = TransformToParentVec(cam, Vec(0, 0, -1))
 	local c = VecDot(VecNormalize(to), f)
 	return c > math.cos(math.rad(PET_ANGLE)) and c or false       -- (how straight at him: the ball's prompt competes)
 end
 
 -- the ball lying near me, in view (not in anyone's tools, not grabbed): where it is, or nil
-local function canTake(me)
-	local m = readShared()
-	if not (m and m.ball and m.ball ~= 0) then return nil end
+local function canTake(me, S)
+	if not (S and S.ball and S.ball ~= 0) then return nil end
 	if not (IsPlayerValid(me) and GetPlayerHealth(me) > 0) or GetPlayerVehicle(me) ~= 0 then return nil end
 	local ball = (FindBodies("mochiball", true) or {})[1]                -- (by its tag: the same on every machine)
 	local b = ball and IsHandleValid(ball) and toyMiddle(ball)
@@ -335,14 +359,18 @@ local function holdItem(me)
 	SetToolTransform(t, 0.6)
 end
 
--- (the host's game) the loudest sound this frame, if he would hear it (loud enough for how far it is): to the server, which
--- turns him to it. Throttled; a louder one gets through at once
+-- (the host's game) the loudest sound this frame, if a dog would hear it (loud enough for how far it is): to the server,
+-- which turns the dogs that hear it. Throttled; a louder one gets through at once
 local function listen(me)
 	local okH, isHost = pcall(IsPlayerHost, me)
-	if not (okH and isHost) or not V.mid then return end
+	if not (okH and isHost) then return end
 	local vol, pos = GetLastSound()
 	if not vol or vol < SOUND_MIN or not pos then return end
-	if VecLength(VecSub(pos, V.mid)) > vol * SOUND_REACH then return end
+	local heard = false
+	for _, E in pairs(V.dogs) do
+		if E.mid and not E.dead and VecLength(VecSub(pos, E.mid)) <= vol * (MOCHI_SOUND_REACH or 60) then heard = true end
+	end
+	if not heard then return end
 	local t = GetTime()
 	if t - (V.soundT or -1e9) < 0.3 and vol <= (V.soundVol or 0) then return end
 	V.soundT, V.soundVol = t, vol
@@ -352,18 +380,23 @@ end
 function MochiClientTick(dt)
 	local me = GetLocalPlayer()
 	holdItem(me)
-	if not readShared() then return end
+	local S = readShared()
+	if not S then return end
 	listen(me)
 	if typing(me) then return end
-	-- E: petting him or picking up the ball - whichever is nearer the middle of the view (he drops the ball at his
-	-- mouth, so both are often in view)
-	local petC = canPet(me)
-	local takeAt, takeC = canTake(me)
+	-- E: petting the dog looked at most straight or picking up the ball - whichever is nearer the middle of the view (a
+	-- dog drops the ball at his mouth, so both are often in view)
+	local petC, petK = false, nil
+	for k, E in pairs(V.dogs) do
+		local c = canPet(me, E)
+		if c and (not petC or c > petC) then petC, petK = c, k end
+	end
+	local takeAt, takeC = canTake(me, S)
 	if petC and takeAt then
 		if takeC > petC then petC = false else takeAt = nil end
 	end
-	V.petOk, V.takeAt = petC and true or false, takeAt
-	if V.petOk and InputPressed("interact") then ServerCall("server.mochi_pet", me)
+	V.petOk, V.petK, V.takeAt = petC and true or false, petC and petK or nil, takeAt
+	if V.petOk and InputPressed("interact") then ServerCall("server.mochi_pet", me, V.petK)
 	elseif V.takeAt and InputPressed("interact") then ServerCall("server.mochi_take", me) end
 	if InputPressed("h") and IsPlayerValid(me) and GetPlayerHealth(me) > 0 then ServerCall("server.mochi_treat", me) end
 end
@@ -387,18 +420,14 @@ local function key(label, text, x, y)
 	UiPop()
 end
 
-function MochiClientDraw()
-	local m = readShared()
-	if not m or not V.headTop then return end
-	local me = GetLocalPlayer()
-	local now = GetTime()
-	-- hearts rise from its head
-	for i = #V.hearts, 1, -1 do
-		local h = V.hearts[i]
+-- hearts rising from dog E's head, and his health over it while he's hurt (and alive), within 25 m
+local function drawDog(E, now)
+	for i = #E.hearts, 1, -1 do
+		local h = E.hearts[i]
 		local age = now - h.t0
-		if age > 1.6 then table.remove(V.hearts, i)
+		if age > 1.6 then table.remove(E.hearts, i)
 		elseif age >= 0 then
-			local p = VecAdd(V.headTop, Vec(h.x, 0.1 + age * 0.45, h.z))
+			local p = VecAdd(E.headTop, Vec(h.x, 0.1 + age * 0.45, h.z))
 			local x, y, dist = UiWorldToPixel(p)
 			if dist and dist > 0 and dist < 40 then
 				UiPush()
@@ -413,11 +442,10 @@ function MochiClientDraw()
 		end
 	end
 	if MOCHI_NO_HUD then return end                                  -- (staged pictures: no hints, notices or prompts)
-	-- his health over his head while he's hurt (and alive), within 25 m
-	if not m.dead and m.hp and m.maxHp and m.hp < m.maxHp - 0.5 then
-		local x, y, dist = UiWorldToPixel(VecAdd(V.headTop, Vec(0, 0.32, 0)))
+	if not E.dead and E.hp and E.maxHp and E.hp < E.maxHp - 0.5 then
+		local x, y, dist = UiWorldToPixel(VecAdd(E.headTop, Vec(0, 0.32, 0)))
 		if dist and dist > 0 and dist < 25 then
-			local f = clamp(m.hp / m.maxHp, 0, 1)
+			local f = clamp(E.hp / E.maxHp, 0, 1)
 			local w, h = 90 * clamp(4 / dist, 0.5, 1.4), 9 * clamp(4 / dist, 0.6, 1.3)
 			UiPush()
 			UiTranslate(x - w / 2, y - h / 2)
@@ -429,28 +457,54 @@ function MochiClientDraw()
 			UiPop()
 		end
 	end
+end
+
+function MochiClientDraw()
+	local S = readShared()
+	if not S then return end
+	local me = GetLocalPlayer()
+	local now = GetTime()
+	local nearD = 1e9                                                -- (how far the nearest dog is from me)
+	local feet = IsPlayerValid(me) and GetPlayerTransform(me).pos or nil
+	for _, E in pairs(V.dogs) do
+		if E.headTop then
+			drawDog(E, now)
+			if feet and E.mid then nearD = math.min(nearD, VecLength(VecSub(E.mid, feet))) end
+		end
+	end
+	if MOCHI_NO_HUD then return end
 	if typing(me) or not IsPlayerValid(me) or GetPlayerHealth(me) <= 0 then return end
 	if V.takeAt then
 		local x, y, dist = UiWorldToPixel(VecAdd(V.takeAt, Vec(0, 0.3, 0)))
 		if dist and dist > 0 then key("E", "Pick up ball", x, y) end
 	end
-	if V.petOk then
-		local x, y, dist = UiWorldToPixel(VecAdd(V.headTop, Vec(0, 0.25, 0)))
-		if dist and dist > 0 then key("E", "Pet " .. MOCHI_NAME, x, y) end
+	local P = V.petOk and V.dogs[V.petK]
+	if P and P.headTop then
+		local x, y, dist = UiWorldToPixel(VecAdd(P.headTop, Vec(0, 0.25, 0)))
+		if dist and dist > 0 then key("E", "Pet " .. (P.name or "Mochi"), x, y) end
 	end
-	local feet = GetPlayerTransform(me).pos
-	-- the host learns why he can't talk (the AI off, its budget spent, an error and Koetama's reason), near him
+	-- the host learns why the dogs can't talk (the AI off, its budget spent, an error and Koetama's reason), near one -
+	-- once, however many dogs there are
 	local okH, isHost = pcall(IsPlayerHost, me)
-	if okH and isHost and type(m.why) == "string" and m.why ~= "" and VecLength(VecSub(V.mid, feet)) < 15 then
+	if okH and isHost and type(S.only) == "string" then              -- (a spawn refused: one dog at a time)
+		UiPush()
+		UiTranslate(UiCenter(), UiHeight() - 120)
+		UiAlign("center middle")
+		UiFont("bold.ttf", 18)
+		UiColor(1, 0.65, 0.3, 0.9)
+		UiText(S.only)
+		UiPop()
+	end
+	if okH and isHost and type(S.why) == "string" and S.why ~= "" and nearD < 15 then
 		UiPush()
 		UiTranslate(UiCenter(), UiHeight() - 90)
 		UiAlign("center middle")
 		UiFont("bold.ttf", 18)
 		UiColor(1, 0.65, 0.3, 0.9)
-		UiText(m.why)
+		UiText(S.why)
 		UiPop()
 	end
-	if VecLength(VecSub(V.mid, feet)) < HINT_RANGE then
+	if nearD < HINT_RANGE then
 		UiPush()
 		UiTranslate(UiCenter(), UiHeight() - 60)
 		UiAlign("center middle")
