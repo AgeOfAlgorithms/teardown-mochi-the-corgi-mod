@@ -2617,6 +2617,7 @@ local function agentKeys()
 	if GetInt("proxchat.version") >= 20 then put("hearagents", "20") end
 	put("mode", MochiIsQuiet() and "whisper" or "speak")
 	put("max_words", "30")
+	if GetBool("proxchat.agentfinal") then put("max_rounds", "3") end   -- (API 23: at most 3 requests a turn)
 	put("functions", FUNCTIONS)
 	if M.anchor and IsHandleValid(M.anchor) then put("at", "body:" .. M.anchor)
 	else
@@ -2786,6 +2787,10 @@ local function standingWhy()
 	return MochiWhyText(st, "")
 end
 
+-- the calls that need no spoken reaction when they worked (the action is the answer)
+local FINAL_CALLS = {trick = true, follow = true, stay = true, come = true, fetch = true, drop = true, relax = true,
+	quiet = true, wag = true, stop_attack = true}
+
 -- the agent's function calls (a ring of 16): check each, do it, answer it
 local function calls()
 	local M = MOCHI
@@ -2814,6 +2819,9 @@ local function calls()
 			end
 			local ok, ok2, res = pcall(MochiCommand, name, args, speaker)
 			SetString(k .. "result", ok and tostring(res) or "error: that didn't work")
+			-- (API 23, the user, 2026-11-16: fewer requests) a plain action that worked ends the turn: the dog just does
+			-- it, no follow-up request to react to the result. Errors, relays, attacks and running away still get one
+			if ok and ok2 and FINAL_CALLS[name] and tostring(res):sub(1, 3) == "ok:" then SetBool(k .. "final", true) end
 		end
 	end
 	M.calls = last
