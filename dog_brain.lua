@@ -2640,6 +2640,7 @@ local function replies()
 	if n ~= M.replyN then
 		M.replyN = n
 		local text = GetString(reg .. ".reply")
+		if text ~= "" then M.finalT = nil end                           -- (he did say something)
 		M.talkUntil = math.max(M.talkUntil, now() + clamp(#text * 0.065, 0.6, 7))
 		M.lineT = M.lineT or {}                                         -- (his lines' times: the rubric's pacing, the
 		table.insert(M.lineT, now())                                    --  events' wait)
@@ -2655,6 +2656,10 @@ local function replies()
 		if sp and alive(sp) then M.look, M.lookUntil = sp, now() + 4 end
 	end
 	if GetString(reg .. ".live") ~= "" then M.talkUntil = math.max(M.talkUntil, now() + 0.4) end
+	if M.finalT and now() - M.finalT > 1.5 then                         -- (an action that ended the turn, and no words)
+		M.finalT = nil
+		if not MochiIsQuiet() then MochiSay(({"Woof!", "Arf!", "Woof woof!", "Yip!"})[math.random(4)]) end
+	end
 	-- no reply came (.error: a code - budget, queue_full, failed, unknown_agent, ...; .why: what went wrong, in words):
 	-- something in character instead. Cleared once read, so the same code twice is two failures
 	local err = GetString(reg .. ".error")
@@ -2821,7 +2826,12 @@ local function calls()
 			SetString(k .. "result", ok and tostring(res) or "error: that didn't work")
 			-- (API 23, the user, 2026-11-16: fewer requests) a plain action that worked ends the turn: the dog just does
 			-- it, no follow-up request to react to the result. Errors, relays, attacks and running away still get one
-			if ok and ok2 and FINAL_CALLS[name] and tostring(res):sub(1, 3) == "ok:" then SetBool(k .. "final", true) end
+			if ok and ok2 and FINAL_CALLS[name] and tostring(res):sub(1, 3) == "ok:" then
+				SetBool(k .. "final", true)
+				-- (the model only calls the function, no words - seen with DeepSeek: he'd do it silently) a woof of his own
+				-- if no words come within a moment (no request for it)
+				if name ~= "quiet" then M.finalT = now() end
+			end
 		end
 	end
 	M.calls = last
